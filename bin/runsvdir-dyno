@@ -11,6 +11,7 @@ if [ ! -f "$PS_PROCFILE" ]; then
 fi
 
 SERVICE_DIR=".service.$PS_TYPE"
+SUPERVISOR_PID=$$
 rm -rf "$SERVICE_DIR"
 mkdir "$SERVICE_DIR"
 
@@ -34,8 +35,8 @@ cat "$PS_PROCFILE" | \
 
       cat <<-EOF | sed 's/\s\{8\}//' > "$svdir/finish"
         #!/bin/sh
-        echo "buildpack=runit at=exit status=\$1 waitpid_lsb=\$2"
-        exec pkill -HUP -f 'runsvdir "$SERVICE_DIR"'
+        echo "buildpack=runit ps=$ps at=exit status=\$1 waitpid_lsb=\$2"
+        kill -HUP "$SUPERVISOR_PID"
 			EOF
       chmod 0755 "$svdir/finish"
     fi
