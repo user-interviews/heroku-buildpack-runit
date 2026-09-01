@@ -1,0 +1,83 @@
+#!/bin/bash
+
+set -euo pipefail
+
+repo_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+test_dir=$(mktemp -d)
+supervisor_pid=
+
+cleanup() {
+  if [[ -n $supervisor_pid ]] && kill -0 "$supervisor_pid" 2>/dev/null; then
+    kill "$supervisor_pid"
+    wait "$supervisor_pid" 2>/dev/null || true
+  fi
+
+  rm -rf "$test_dir"
+}
+
+trap cleanup EXIT
+
+mkdir -p "$test_dir/bin" "$test_dir/home"
+
+# Stand in for the long-running runsvdir process. The buildpack launcher execs
+# this stub, preserving its PID, and runsvdir's documented HUP status is 111.
+cat > "$test_dir/bin/runsvdir" <<'EOF'
+#!/bin/sh
+
+trap 'exit 111' HUP
+touch "$RUNIT_TEST_READY"
+
+while :; do
+  sleep 1
+done
+EOF
+chmod 0755 "$test_dir/bin/runsvdir"
+
+# DYNO=test.1 makes the buildpack read Procfile.test and create .service.test.
+printf 'worker: true\n' > "$test_dir/Procfile.test"
+
+# Run the buildpack launcher in the background so the test can invoke the
+# generated finish hook as runsv would after a child exits.
+cd "$test_dir"
+DYNO=test.1 \
+  HOME="$test_dir/home" \
+  PATH="$test_dir/bin:$PATH" \
+  RUNIT_TEST_READY="$test_dir/ready" \
+  "$repo_dir/bin/runsvdir-dyno" > "$test_dir/output" 2>&1 &
+supervisor_pid=$!
+cd "$repo_dir"
+
+# Wait for the launcher to exec the stub and finish generating the service.
+for _ in {1..50}; do
+  if [[ -f $test_dir/ready && -x $test_dir/.service.test/worker/finish ]]; then
+    break
+  fi
+
+  sleep 0.1
+done
+
+if [[ ! -f $test_dir/ready || ! -x $test_dir/.service.test/worker/finish ]]; then
+  echo "runsvdir supervisor did not start" >&2
+  exit 1
+fi
+
+# Simulate the worker exiting with status 127. The finish hook must HUP the
+# captured supervisor PID instead of allowing runsv to restart the worker.
+"$test_dir/.service.test/worker/finish" 127 0 >> "$test_dir/output" 2>&1
+
+set +e
+wait "$supervisor_pid"
+status=$?
+set -e
+supervisor_pid=
+
+if [[ $status -ne 111 ]]; then
+  echo "expected supervisor to exit 111 after HUP, got $status" >&2
+  exit 1
+fi
+
+# Include the process name so failures are attributable in multi-service dynos.
+if ! grep -q 'buildpack=runit ps=worker at=exit status=127 waitpid_lsb=0' "$test_dir/output"; then
+  echo "expected process-specific exit log was not written" >&2
+  exit 1
+fi

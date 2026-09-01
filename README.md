@@ -26,3 +26,14 @@ unicorn: bundle exec unicorn -c config/unicorn.rb ...
 Now, when running a `web` dyno, both the `nginx` and `unicorn` processes will run under runit.
 
 If any process specified in `Procfile.web` crashes, the entire dyno will be restarted.
+
+## Testing
+
+Run the supervisor lifecycle regression test directly:
+
+```sh
+test/runsvdir-dyno
+```
+
+The test uses a temporary Procfile and a stub `runsvdir`; it does not require a
+Heroku app or an installed copy of runit.
